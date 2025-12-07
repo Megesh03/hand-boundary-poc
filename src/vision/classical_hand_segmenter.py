@@ -77,8 +77,12 @@ class ClassicalHandSegmenter:
         """
         h, w = frame.shape[:2]
         
+        # PRE-SMOOTH: Gaussian blur to reduce noise before processing
+        # Small kernel (3x3) preserves hand edges while removing sensor noise
+        frame_blurred = cv2.GaussianBlur(frame, (3, 3), 0)
+        
         # Convert to YCrCb for skin detection
-        ycrcb = cv2.cvtColor(frame, cv2.COLOR_BGR2YCrCb)
+        ycrcb = cv2.cvtColor(frame_blurred, cv2.COLOR_BGR2YCrCb)
         
         # Split channels
         y, cr, cb = cv2.split(ycrcb)
@@ -114,17 +118,21 @@ class ClassicalHandSegmenter:
             if self.use_motion:
                 self.prev_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         
-        # Morphological cleanup
-        # 1. Open to remove noise
+        # Morphological cleanup (enhanced 4-stage pipeline)
+        # 1. Small OPEN: Remove isolated noise pixels (salt noise)
         mask = cv2.morphologyEx(combined_mask, cv2.MORPH_OPEN, 
-                                self.morph_kernel_small, iterations=1)
+                                self.morph_kernel_small, iterations=2)  # Was 1 → Now 2
         
-        # 2. Close to fill gaps
+        # 2. Larger CLOSE: Fill internal holes and connect nearby regions
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, 
-                               self.morph_kernel_large, iterations=2)
+                               self.morph_kernel_large, iterations=3)  # Was 2 → Now 3
         
-        # 3. Median blur for smoothing
-        mask = cv2.medianBlur(mask, 5)
+        # 3. Median blur: Smooth boundary while preserving edges
+        mask = cv2.medianBlur(mask, 7)  # Was 5 → Now 7 (stronger smoothing)
+        
+        # 4. Final gentle OPEN: Remove any small artifacts from median blur
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,
+                               self.morph_kernel_small, iterations=1)
         
         # Contour filtering - keep only large regions (likely hands)
         mask = self._filter_contours(mask)

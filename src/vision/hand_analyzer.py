@@ -28,16 +28,20 @@ class HandAnalyzer:
     
     def __init__(self,
                  min_contour_area: int = 2000,
-                 fallback_to_centroid: bool = True):
+                 fallback_to_centroid: bool = False):
         """
         Initialize hand analyzer.
         
         Args:
-            min_contour_area: Minimum pixels for valid hand contour
-            fallback_to_centroid: Use farthest from centroid if topmost fails
+            min_contour_area: Minimum contour area threshold
+            fallback_to_centroid: Use farthest point if topmost fails
         """
         self.min_contour_area = min_contour_area
         self.fallback_to_centroid = fallback_to_centroid
+        
+        # Fingertip smoothing buffer (temporal stability)
+        from collections import deque
+        self.fingertip_buffer = deque(maxlen=5)  # Last 5 fingertip positions
     
     def analyze(self, mask: np.ndarray) -> Dict:
         """
@@ -85,8 +89,13 @@ class HandAnalyzer:
         centroid = self._compute_centroid(largest_contour)
         result['centroid'] = centroid
         
-        # Compute convex hull
-        hull = cv2.convexHull(largest_contour, returnPoints=True)
+        # Smooth contour using polygon approximation before hull computation
+        # Uses Douglas-Peucker algorithm to reduce vertices while preserving shape
+        epsilon = 0.005 * cv2.arcLength(largest_contour, True)  # 0.5% of perimeter
+        smoothed_contour = cv2.approxPolyDP(largest_contour, epsilon, True)
+        
+        # Compute convex hull from smoothed contour (fewer vertices = more stable)
+        hull = cv2.convexHull(smoothed_contour, returnPoints=True)
         result['hull'] = hull
         
         # Find fingertip
@@ -145,21 +154,33 @@ class HandAnalyzer:
         
         # Find topmost point (minimum y coordinate)
         topmost_idx = np.argmin(points[:, 1])
-        topmost = tuple(points[topmost_idx])
+        raw_fingertip = tuple(points[topmost_idx])
         
         # Check if fallback is needed
         if self.fallback_to_centroid and centroid is not None:
             # If topmost point is below centroid (larger y), use farthest point
-            if topmost[1] > centroid[1]:
+            if raw_fingertip[1] > centroid[1]:
                 # Find farthest point from centroid
                 distances = np.sqrt(
                     (points[:, 0] - centroid[0]) ** 2 +
                     (points[:, 1] - centroid[1]) ** 2
                 )
                 farthest_idx = np.argmax(distances)
-                return tuple(points[farthest_idx])
+                raw_fingertip = tuple(points[farthest_idx])
         
-        return topmost
+        # TEMPORAL SMOOTHING: Average last N fingertip positions
+        self.fingertip_buffer.append(raw_fingertip)
+        
+        if len(self.fingertip_buffer) >= 3:  # Need at least 3 samples for stability
+            # Compute median position (robust to outliers)
+            x_coords = [pt[0] for pt in self.fingertip_buffer]
+            y_coords = [pt[1] for pt in self.fingertip_buffer]
+            smoothed_x = int(np.median(x_coords))
+            smoothed_y = int(np.median(y_coords))
+            return (smoothed_x, smoothed_y)
+        else:
+            # Insufficient history, use raw
+            return raw_fingertip
     
     def get_hull_points(self, hull: np.ndarray) -> List[Tuple[int, int]]:
         """

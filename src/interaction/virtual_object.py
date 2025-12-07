@@ -84,6 +84,9 @@ class VirtualRectangle:
         dy = py - closest_y
         distance = np.sqrt(dx * dx + dy * dy)
         
+        # Clamp distance to reasonable bounds (prevents inf/nan propagation)
+        distance = max(0.0, min(distance, 500.0))  # Cap at 500px (beyond SAFE threshold)
+        
         return float(distance)
     
     def contains_point(self, point: Tuple[int, int]) -> bool:

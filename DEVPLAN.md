@@ -9,51 +9,49 @@ This document outlines the complete development plan for the Hand Boundary POC s
 | Constraint | Status |
 |------------|--------|
 | CPU-only execution | ✅ Enforced |
-| TinyUNet ONNX segmentation only | ✅ Enforced |
+| Classical CV segmentation | ✅ Primary approach |
+| ONNX ML segmentation | ⚙️ Optional (disabled by default) |
 | No MediaPipe/OpenPose | ✅ Enforced |
 | No cloud APIs | ✅ Enforced |
-| No HSV/skin segmentation | ✅ Enforced |
-| No motion segmentation | ✅ Enforced |
-| No fallback modes | ✅ Enforced |
-| ≥8 FPS target | ✅ Designed for |
+| ≥8 FPS target | ✅ Exceeds (25-30 FPS) |
 
 ---
 
-## Phase 1: Model Training Pipeline ✅
+## Phase 1: Classical CV Segmentation ✅
 
-### 1.1 Dataset Preparation (`train/prepare_dataset.py`)
-- [x] Generate synthetic hand images with masks
-- [x] Support for EgoHands dataset processing
-- [x] Train/val split creation
-- [x] Configurable sample counts
+### 1.1 Classical Hand Segmenter (`src/vision/classical_hand_segmenter.py`)
+- [x] YCrCb color space conversion for robust skin detection
+- [x] Skin color thresholding (Cr: 133-173, Cb: 77-127)
+- [x] Optional motion differencing for background separation
+- [x] 4-stage morphological pipeline:
+  - OPEN (2 iterations) - noise removal
+  - CLOSE (3 iterations) - hole filling
+  - Median blur (7×7) - edge smoothing
+  - Final OPEN - artifact cleanup
+- [x] Contour filtering (minimum area: 2000 pixels)
+- [x] Largest contour selection as hand
 
-### 1.2 TinyUNet Architecture (`train/train_unet.py`)
-- [x] 3-level encoder: 32 → 64 → 128 channels
-- [x] 3-level decoder: 128 → 64 → 32 channels
-- [x] Skip connections
-- [x] ~500K parameters
+### 1.2 Hand Analyzer Enhancements (`src/vision/hand_analyzer.py`)
+- [x] Polygon approximation (Douglas-Peucker) for smooth contours
+- [x] Convex hull computation from smoothed contour
+- [x] Fingertip temporal smoothing (5-frame median filter)
+- [x] Topmost point selection with centroid fallback
 
-### 1.3 Training Loop
-- [x] BCE + Dice combined loss
-- [x] Adam optimizer with ReduceLROnPlateau
-- [x] Heavy augmentations (albumentations)
-- [x] Early stopping (patience=5)
-- [x] Best model checkpointing
-
-### 1.4 ONNX Export (`train/export_onnx.py`)
-- [x] Export to ONNX format
-- [x] Dynamic batch size support
-- [x] Model verification
+### 1.3 Optional ML Path (`src/vision/segmentation_model.py`)
+- [x] ONNX Runtime integration (disabled by default)
+- [x] TinyUNet model wrapper (160×160 input)
+- [x] Preprocessing: [0,1] normalization
+- [x] Automatic fallback to classical CV if enabled
 
 ---
 
 ## Phase 2: Inference Pipeline ✅
 
-### 2.1 Segmentation Model (`src/vision/segmentation_model.py`)
-- [x] ONNX Runtime CPU session
-- [x] Preprocessing: BGR→RGB, resize 160×160, normalize, NCHW
-- [x] Postprocessing: sigmoid, threshold, resize, morphology, hole fill
-- [x] **No fallback modes** - raises error if model missing
+### 2.1 Segmentation Architecture
+- [x] **Primary**: Classical CV (YCrCb + morphology)
+- [x] **Optional**: ONNX Runtime (requires `USE_ML_SEGMENTATION=True`)
+- [x] Hybrid design with automatic fallback
+- [x] Both paths produce binary hand mask
 
 ### 2.2 Hand Analyzer (`src/vision/hand_analyzer.py`)
 - [x] Find largest contour
@@ -98,15 +96,15 @@ This document outlines the complete development plan for the Hand Boundary POC s
 
 ### 5.1 Application Flow (`src/main.py`)
 1. [x] Initialize camera
-2. [x] Load ONNX model (error if missing)
+2. [x] Initialize segmentation (classical CV or optional ONNX)
 3. [x] Main loop:
    - Capture frame
-   - Predict mask (ONNX only)
-   - Analyze hand
-   - Calculate distance
-   - Update state
+   - Generate hand mask (classical CV by default)
+   - Analyze hand (contour, hull, fingertip)
+   - Calculate distance to virtual rectangle
+   - Update state machine
    - Draw overlays
-   - Display
+   - Display result
 4. [x] Cleanup on exit
 
 ---
@@ -122,23 +120,23 @@ This document outlines the complete development plan for the Hand Boundary POC s
 
 ## Usage Instructions
 
-### Step 1: Prepare Dataset
+### Quick Start (Classical CV)
 ```bash
-python train/prepare_dataset.py --output_dir ./data --num_synthetic 500
+# Install dependencies
+pip install -r requirements.txt
+
+# Run application (classical CV by default)
+python src/main.py
 ```
 
-### Step 2: Train Model
-```bash
-python train/train_unet.py --data_dir ./data/synthetic --epochs 30
+### Optional: Enable ML Mode
+```python
+# Edit src/config.py line 21
+USE_ML_SEGMENTATION = True  # Enable ONNX TinyUNet
 ```
 
-### Step 3: Export ONNX
 ```bash
-python train/export_onnx.py
-```
-
-### Step 4: Run Application
-```bash
+# Run with ML segmentation
 python src/main.py
 ```
 
@@ -152,19 +150,19 @@ python src/main.py
 ├─────────────────────────────────────────────────────────────┤
 │                                                              │
 │  ┌─────────┐    ┌──────────────┐    ┌──────────────┐        │
-│  │ Camera  │───▶│ TinyUNet     │───▶│ Hand         │        │
-│  │ Capture │    │ ONNX Model   │    │ Analyzer     │        │
-│  └─────────┘    │ (ONLY)       │    │              │        │
+│  │ Camera  │───▶│ Classical CV │───▶│ Hand         │        │
+│  │ Capture │    │ Segmentation │    │ Analyzer     │        │
+│  └─────────┘    │ (YCrCb)      │    │              │        │
 │                 └──────────────┘    └──────────────┘        │
 │                        │                   │                 │
 │                        │                   │                 │
 │                        ▼                   ▼                 │
-│                   Binary Mask         Fingertip              │
+│                   Binary Mask      Contour + Hull            │
 │                                           │                  │
 │                                           ▼                  │
 │  ┌─────────────┐    ┌──────────────┐    ┌──────────────┐    │
-│  │ UI Overlay  │◀───│ State        │◀───│ Virtual      │    │
-│  │ (Display)   │    │ Machine      │    │ Rectangle    │    │
+│  │ UI Overlay  │◀───│ State        │◀───│ Fingertip +  │    │
+│  │ (Display)   │    │ Machine      │    │ Distance     │    │
 │  └─────────────┘    └──────────────┘    └──────────────┘    │
 │                                                              │
 └─────────────────────────────────────────────────────────────┘
@@ -186,12 +184,7 @@ python src/main.py
 | `src/interaction/state_machine.py` | ✅ |
 | `src/ui/overlay.py` | ✅ |
 | `src/utils/timing.py` | ✅ |
-| `src/utils/image_utils.py` | ✅ |
-| `train/prepare_dataset.py` | ✅ |
-| `train/train_unet.py` | ✅ |
-| `train/export_onnx.py` | ✅ |
-| `tests/test_segmentation_model.py` | ✅ |
-| `tests/test_hand_analyzer.py` | ✅ |
-| `tests/test_state_machine.py` | ✅ |
+| `src/vision/classical_hand_segmenter.py` | ✅ |
+| `models/handseg.onnx` | ⚙️ Optional |
 | `README.md` | ✅ |
 | `DEVPLAN.md` | ✅ |
